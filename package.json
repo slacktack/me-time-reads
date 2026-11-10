@@ -2,5 +2,6 @@
   "name": "kindle-clone-reader",
   "private": true,
   "type": "module",
-  "scripts": { "start": "node server.js", "test": "node --test" }
+  "scripts": { "start": "node server.js", "build": "node catalog.js", "test": "node --test" },
+  "engines": { "node": ">=22" }
 }

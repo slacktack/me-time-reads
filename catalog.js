@@ -51,10 +51,16 @@ async function download(url, file, gz) {
   await fs.writeFile(file, buf);
 }
 
-export async function loadCatalog() {
+export async function loadCatalog({ refresh = !process.env.VERCEL } = {}) {
   const csv = path.join(DATA, 'pg_catalog.csv'), topFile = path.join(DATA, 'top.html');
+  // On Vercel the files come from the build step and the filesystem is read-only.
+  if (!refresh) return parseFiles(csv, topFile);
   if (!(await fresh(csv, WEEK))) await download(CSV_URL, csv, true).catch(e => console.warn('catalog refresh failed:', e.message));
   if (!(await fresh(topFile, 864e5))) await download(TOP_URL, topFile).catch(e => console.warn('top list refresh failed:', e.message));
+  return parseFiles(csv, topFile);
+}
+
+async function parseFiles(csv, topFile) {
   const [head, ...rows] = parseCsv(await fs.readFile(csv, 'utf8'));
   const col = Object.fromEntries(head.map((h, i) => [h, i]));
   books = rows.filter(r => r[col.Type] === 'Text').map(r => ({
@@ -89,3 +95,10 @@ export function search({ q = '', topic = '', page = 1, lang = 'en', per = 32 }) 
 }
 
 export const book = id => { const b = byId.get(+id); return b && toBook(b, topRank.get(b.id)); };
+
+// `npm run build`: fetch the catalog so a deploy ships with it.
+if (process.argv[1] === import.meta.filename) {
+  await fs.rm(path.join(DATA, 'pg_catalog.csv'), { force: true });
+  await fs.rm(path.join(DATA, 'top.html'), { force: true });
+  await loadCatalog({ refresh: true });
+}

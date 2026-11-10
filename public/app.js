@@ -17,10 +17,13 @@ let syncTimer;
 const saveLib = () => { save('pw.lib', library); clearTimeout(syncTimer); syncTimer = setTimeout(sync, 2000); };
 
 // Progress syncs through this server so phone and computer share one library.
+let syncOff = false;
 async function sync(keepalive = false) {
   clearTimeout(syncTimer);
+  if (syncOff) return false;
   try {
     const res = await fetch('/api/library', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(library), keepalive });
+    if (res.status === 501 || res.status === 404) syncOff = true;
     if (!res.ok) return false;
     const merged = await res.json();
     const changed = JSON.stringify(merged) !== JSON.stringify(library);

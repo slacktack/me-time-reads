@@ -1,0 +1,13 @@
+{
+  "buildCommand": "npm run build",
+  "outputDirectory": "public",
+  "functions": {
+    "api/handler.js": { "includeFiles": "data/**", "maxDuration": 30, "memory": 1024 }
+  },
+  "rewrites": [
+    { "source": "/proxy", "destination": "/api/handler?route=proxy" },
+    { "source": "/api/gutenberg/book/:id", "destination": "/api/handler?route=book&id=:id" },
+    { "source": "/api/gutenberg", "destination": "/api/handler?route=search" },
+    { "source": "/api/library", "destination": "/api/handler?route=library" }
+  ]
+}
