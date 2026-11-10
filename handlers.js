@@ -4,7 +4,7 @@ import zlib from 'node:zlib';
 import * as catalog from './catalog.js';
 import { mergeLibrary } from './public/lib.js';
 
-const ALLOWED = new Set(['gutendex.com', 'www.gutenberg.org', 'gutenberg.org', 'standardebooks.org']);
+const ALLOWED = new Set(['gutendex.com', 'www.gutenberg.org', 'gutenberg.org', 'standardebooks.org', 'covers.openlibrary.org']);
 // shortcut: per-instance memory cache; the CDN (s-maxage) does the heavy lifting on Vercel.
 const cache = new Map();
 const MAX = 300;
@@ -42,8 +42,11 @@ async function proxy(req, res, target) {
   try {
     const { res: up, finalUrl } = await fetchAllowed(url);
     const body = Buffer.from(await up.arrayBuffer());
-    const headers = { 'Content-Type': up.headers.get('content-type') || 'text/plain', 'X-Final-Url': finalUrl, 'Cache-Control': 'public, max-age=3600, s-maxage=86400' };
-    if (up.ok) {
+    const type = up.headers.get('content-type') || 'text/plain';
+    const image = type.startsWith('image/');
+    const headers = { 'Content-Type': type, 'X-Final-Url': finalUrl,
+      'Cache-Control': !up.ok ? 'no-store' : image ? 'public, max-age=2592000, s-maxage=31536000, immutable' : 'public, max-age=3600, s-maxage=86400' };
+    if (up.ok && !image) {
       if (cache.size >= MAX) cache.delete(cache.keys().next().value);
       cache.set(url.href, { headers, body });
     }
@@ -55,7 +58,7 @@ async function proxy(req, res, target) {
 
 // Gzip big bodies: Vercel caps function responses at 4.5 MB and book HTML can be large.
 function send(req, res, code, headers, body) {
-  if (body.length > 1024 && /\bgzip\b/.test(req.headers['accept-encoding'] || '')) {
+  if (body.length > 1024 && !/^image\//.test(headers['Content-Type'] || '') && /\bgzip\b/.test(req.headers['accept-encoding'] || '')) {
     body = zlib.gzipSync(body);
     headers = { ...headers, 'Content-Encoding': 'gzip', Vary: 'Accept-Encoding' };
   }

@@ -152,7 +152,14 @@ async function bookInfo(key) {
 const splitKey = key => { const i = key.indexOf(':'); return [key.slice(0, i), key.slice(i + 1)]; };
 const routeOf = key => splitKey(key).join('/');
 
-async function bookText(key) {
+// One download per book, shared by the prefetch and the reader.
+const inflight = new Map();
+function bookText(key) {
+  if (!inflight.has(key)) inflight.set(key, fetchBookText(key).finally(() => inflight.delete(key)));
+  return inflight.get(key);
+}
+
+async function fetchBookText(key) {
   const [src, id] = splitKey(key);
   const hit = await idb('get', key);
   if (hit) return hit;
@@ -219,10 +226,16 @@ function clean(raw, base) {
   return doc.body.innerHTML;
 }
 
+const readable = b => !b.key.startsWith('ol:') || (b.access === 'public' && b.ia);
+function prefetch(key) { bookText(key).catch(() => {}); }
+
 /* ---------- UI pieces ---------- */
+// Covers go through our proxy so Vercel's CDN caches them; the origins take 1–3 s per image.
+const COVER_HOSTS = /^https:\/\/(covers\.openlibrary\.org|www\.gutenberg\.org|standardebooks\.org)\//;
+const coverSrc = url => url && COVER_HOSTS.test(url) ? '/proxy?url=' + encodeURIComponent(url) : url;
 const coverFallback = b => `<div class="cover-type"><b>${esc(b.title)}</b><i>${esc(b.author)}</i></div>`;
 const cover = (b, eager) => `<div class="cover">${b.cover
-  ? `${coverFallback(b)}<img src="${esc(b.cover)}" alt="" decoding="async" ${eager ? 'fetchpriority="high"' : 'loading="lazy"'} onload="this.classList.add('in')" onerror="this.remove()">`
+  ? `${coverFallback(b)}<img src="${esc(coverSrc(b.cover))}" alt="" decoding="async" ${eager ? 'fetchpriority="high"' : 'loading="lazy"'} onload="this.classList.add('in')" onerror="this.remove()">`
   : coverFallback(b)}${b.key.startsWith('se:') ? '<span class="badge">SE</span>' : b.key.startsWith('ol:') ? (b.access === 'public' ? '<span class="badge">Free scan</span>' : '<span class="badge out">Borrow</span>') : ''}</div>`;
 
 const progressBar = p => `<div class="progress" role="progressbar" aria-valuenow="${Math.round(p * 100)}" aria-valuemin="0" aria-valuemax="100"><span style="width:${(p * 100).toFixed(1)}%"></span></div>`;
@@ -256,7 +269,7 @@ const views = {
     const nav = navId;
     const [last] = recent().filter(b => b.progress > 0 && b.progress < 0.995);
     const heroHtml = (b, label, cta) => `<section class="hero">
-      <div class="glow" style="background-image:url('${esc(b.cover || '')}')" aria-hidden="true"></div>
+      <div class="glow" style="background-image:url('${esc(coverSrc(b.cover) || '')}')" aria-hidden="true"></div>
       <a class="hero-cover" href="#/book/${routeOf(b.key)}" aria-label="${esc(b.title)} details">${cover(b, true)}</a>
       <div class="hero-text">
         <p class="kicker">${label}</p>
@@ -265,6 +278,7 @@ const views = {
         ${b.progress ? `<div class="hero-progress">${progressBar(b.progress)}<span>${Math.round(b.progress * 100)}%</span></div>` : ''}
         <div class="actions"><a class="btn" href="#/read/${routeOf(b.key)}">${cta}</a><a class="btn ghost" href="#/book/${routeOf(b.key)}">About this book</a></div>
       </div></section>`;
+    if (last) prefetch(last.key);
     app.innerHTML = `<div id="hero">${last ? heroHtml(last, 'Continue reading', 'Resume') : '<section class="hero skeleton-hero"></section>'}</div>
       ${recent().length ? `<section class="shelf"><h2>Your library<a href="#/library">See all</a></h2><div class="shelf-row">${recent().slice(0, 14).map(tile).join('')}</div></section>` : ''}
       ${shelf('Most read this month', async () => {
@@ -339,7 +353,7 @@ const views = {
       const inLib = inLibrary(key);
       const [src, id] = splitKey(key);
       const pct = library[key]?.progress || 0;
-      app.innerHTML = `<div class="glow detail-glow" style="background-image:url('${esc(b.cover || '')}')" aria-hidden="true"></div>
+      app.innerHTML = `<div class="glow detail-glow" style="background-image:url('${esc(coverSrc(b.cover) || '')}')" aria-hidden="true"></div>
         <button class="back" onclick="history.length > 1 ? history.back() : location.hash = '#/'">${ICON.back}<span>Back</span></button>
         <article class="detail"><div class="detail-cover">${cover(b, true)}</div><div>
           <h1>${esc(b.title)}</h1><p class="by">${esc(b.author)}</p>
@@ -364,6 +378,7 @@ const views = {
     };
     if (seen) render(seen);
     else app.innerHTML = '<p class="note">Loading book…</p>';
+    if (readable(seen || { key })) prefetch(key);
     const nav = navId;
     try { const b = await bookInfo(key); if (nav === navId) render({ ...seen, ...b }); }
     catch (e) { if (!seen) app.innerHTML = errorNote(e); }
@@ -447,8 +462,11 @@ async function reader({ key }) {
   document.body.classList.add('reading');
   const info = meta.get(key) || library[key] || { key, title: '', author: '' };
   app.innerHTML = `<div class="reader">
-    <div class="r-top"><span class="ttl">${esc(info.title)}</span></div>
-    <div class="pages"><div class="flow" lang="en"></div><div class="loading">Opening book…</div></div>
+    <div class="r-top"><button class="r-back" id="rback" aria-label="Close book">${ICON.back}</button><span class="ttl">${esc(info.title)}</span></div>
+    <div class="pages"><div class="flow" lang="en"></div>
+      <div class="loading"><div class="opening">${info.cover ? cover(info, true) : ''}<p>${esc(info.title || 'Opening book')}</p><div class="bar" aria-hidden="true"></div><span class="sr-only">Opening book</span></div></div></div>
+    <button class="turn prev" id="turnprev" aria-label="Previous page">${ICON.back}</button>
+    <button class="turn next" id="turnnext" aria-label="Next page">${ICON.back}</button>
     <div class="r-bottom"><span id="loc"></span><span id="pct"></span></div>
     <button class="ribbon-hit" id="ribbonhit" aria-label="Bookmark this page"></button><div class="ribbon" aria-hidden="true"></div>
     <div class="chrome" hidden>
@@ -465,13 +483,25 @@ async function reader({ key }) {
   const chrome = R.querySelector('.chrome'), sheet = R.querySelector('.sheet'), scrub = R.querySelector('#scrub');
   let page = 0, total = 1, W = 0, toc = [], tocTab = 'toc';
 
-  R.querySelector('#close').onclick = () => { location.hash = '#/book/' + routeOf(key); };
+  const exit = () => { location.hash = returnTo && !returnTo.startsWith('#/read/') ? returnTo : '#/book/' + routeOf(key); };
+  R.querySelector('#close').onclick = exit;
+  R.querySelector('#rback').onclick = exit;
+
+  // Details only refine the title/cover; never make the reader wait for them.
+  bookInfo(key).then(b => {
+    Object.assign(info, b);
+    if (nav !== navId) return;
+    R.querySelectorAll('.ttl').forEach(t => t.textContent = info.title);
+    if (library[key] && !library[key].deleted) Object.assign(library[key], { title: info.title, author: info.author, cover: info.cover });
+  }).catch(() => {});
 
   let html;
   try {
-    [html] = await Promise.all([bookText(key), bookInfo(key).then(b => Object.assign(info, b)).catch(() => {})]);
+    html = await bookText(key);
   } catch (e) {
-    R.querySelector('.loading').innerHTML = `<div><p>Couldn't open this book: ${esc(e.message)}</p><a class="btn" href="#/book/${routeOf(key)}">Go back</a></div>`;
+    if (nav !== navId) return;
+    R.querySelector('.loading').innerHTML = `<div><p>Couldn't open this book: ${esc(e.message)}</p><button class="btn" id="retry">Try again</button> <a class="btn ghost" href="#/book/${routeOf(key)}">Back to book</a></div>`;
+    R.querySelector('#retry').onclick = () => route();
     return;
   }
   if (nav !== navId) return;
@@ -506,6 +536,7 @@ async function reader({ key }) {
     pageH = pagesEl.clientHeight;
     const g = geometry(W, settings.margin);
     pagesEl.classList.toggle('scroll', scrollMode());
+    R.classList.toggle('scrolling', scrollMode());
     flow.style.setProperty('--page-h', pageH + 'px');
     if (scrollMode()) {
       const width = Math.min(W - 2 * settings.margin, 680);
@@ -695,6 +726,22 @@ async function reader({ key }) {
     const x = (e.clientX - pagesEl.getBoundingClientRect().left) / W;
     if (x < 0.28) go(page - 1); else if (x > 0.72) go(page + 1); else toggleChrome(false);
   });
+  R.querySelector('#turnprev').onclick = () => go(page - 1);
+  R.querySelector('#turnnext').onclick = () => go(page + 1);
+
+  // One-time guide to the tap zones.
+  if (!load('pw.coached', false)) {
+    const touch = matchMedia('(pointer: coarse)').matches;
+    R.insertAdjacentHTML('beforeend', `<div class="coach" role="dialog" aria-label="How to read">
+      <div class="z"><b>${touch ? 'Tap' : 'Click'} here</b>Previous ${scrollMode() ? 'screen' : 'page'}</div>
+      <div class="z mid"><b>${touch ? 'Tap' : 'Click'} the middle</b>Menu, contents, bookmarks and text settings</div>
+      <div class="z"><b>${touch ? 'Tap' : 'Click'} here</b>Next ${scrollMode() ? 'screen' : 'page'}</div>
+      <p>${touch ? 'You can also swipe. The arrow at the top left closes the book.' : 'Arrow keys turn pages, B bookmarks, Esc closes the book.'}</p>
+      <button class="btn" id="coachok">Start reading</button></div>`);
+    const done = () => { save('pw.coached', true); R.querySelector('.coach')?.remove(); };
+    R.querySelector('.coach').onclick = done;
+  }
+
   let tx = 0, ty = 0;
   pagesEl.addEventListener('touchstart', e => { tx = e.touches[0].clientX; ty = e.touches[0].clientY; }, { passive: true });
   pagesEl.addEventListener('touchend', e => {
@@ -706,7 +753,12 @@ async function reader({ key }) {
     if (['ArrowRight', 'PageDown', ' '].includes(e.key)) { e.preventDefault(); go(page + 1); }
     else if (['ArrowLeft', 'PageUp'].includes(e.key)) { e.preventDefault(); go(page - 1); }
     else if (e.key === 'b' && !e.metaKey && !e.ctrlKey) toggleMark();
-    else if (e.key === 'Escape') chrome.hidden ? toggleChrome(false) : toggleChrome(true);
+    else if (e.key === 'Escape') {
+      if (R.querySelector('.coach')) R.querySelector('#coachok').click();
+      else if (!sheet.hidden) sheet.hidden = true;
+      else if (!chrome.hidden) toggleChrome(true);
+      else exit();
+    }
   };
   let rt;
   const onResize = () => { clearTimeout(rt); rt = setTimeout(layout, 150); };
@@ -734,10 +786,12 @@ function rerenderLists() {
 }
 
 /* ---------- router ---------- */
-let cleanup = null;
+let cleanup = null, returnTo = null, lastHash = null;
 function route() {
   cleanup?.(); cleanup = null;
   const r = parseRoute(location.hash);
+  if (r.view === 'read' && lastHash && !lastHash.startsWith('#/read/')) returnTo = lastHash;
+  lastHash = location.hash || '#/';
   const view = views[r.view] ? r.view : 'home';
   navId++;
   const tab = { home: 'home', library: 'library', search: 'search' }[view];
